@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.2.0
-// @description  按实时美元汇率,在 A6api 的收益胶囊/日志行收益,以及编辑模型弹窗的「原价」下方追加等值人民币
+// @version      0.3.0
+// @description  按实时美元汇率换算 A6api 的收益与价格,并在编辑模型弹窗显示原价折合、输入价 ×1.2 提价上限
 // @author       LR
 // @match        https://a6api.vip/*
 // @grant        GM_getValue
@@ -259,6 +259,14 @@
       .a6cny-price-line .is-pending { color: #6b7280; }
       .a6cny-price-line .is-error { color: #dc2626; }
       html[data-theme="dark"] .a6cny-price-line .a6cny-price-value { color: #fbbf24; }
+
+      /* 输入价下方提示:默认沿用页面 factor-line 的灰色,折合人民币部分单独标色 */
+      .a6cny-input-hint { color: #b45309; font-variant-numeric: tabular-nums; }
+      .a6cny-input-hint.is-pending { color: #6b7280; }
+      .a6cny-input-hint.is-error { color: #dc2626; }
+      html[data-theme="dark"] .a6cny-input-hint { color: #fbbf24; }
+      html[data-theme="dark"] .a6cny-input-hint.is-pending { color: #94a3b8; }
+      html[data-theme="dark"] .a6cny-input-hint.is-error { color: #f87171; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -323,13 +331,28 @@
     return rateState.error ? '获取失败' : '加载中';
   }
 
+  // 同一份 DOM 里只保留一行折合价:快照里可能已经带着上一次运行留下的行,
+  // 胶囊组被整体重建时也可能把旧行克隆过来
+  function removeDuplicatePriceLines(line) {
+    const next = line.nextElementSibling;
+    if (!next || !next.classList.contains('a6cny-price-line')) return null;
+    let row = next;
+    let extra = row.nextElementSibling;
+    while (extra && extra.classList.contains('a6cny-price-line')) {
+      const toRemove = extra;
+      extra = extra.nextElementSibling;
+      toRemove.remove();
+    }
+    return row;
+  }
+
   // 在「原价」行下方插入一行人民币换算,结构参照原价行,样式沿用页面自身的类
   function decorateOriginalPrice(line) {
     const parts = parseOriginalPrices(line);
     if (!parts.length) return;
 
-    let row = line.nextElementSibling;
-    if (!row || !row.classList.contains('a6cny-price-line')) {
+    let row = removeDuplicatePriceLines(line);
+    if (!row) {
       row = document.createElement('div');
       row.className = 'ws-original-price-line a6cny-price-line';
       line.insertAdjacentElement('afterend', row);
@@ -358,6 +381,72 @@
       }
       row.appendChild(value);
     });
+  }
+
+  // ---------- 编辑模型弹窗:输入价 ----------
+
+  // 提价上限按页面公示的 20% 计算
+  const MAX_RAISE_FACTOR = 1.2;
+
+  // 价格输入区只有一个可编辑输入框(输入价),自动输出的几项均为 readonly
+  function findInputPriceField() {
+    const grid = document.querySelector('.ws-price-inputs-grid');
+    if (!grid) return null;
+    return Array.from(grid.querySelectorAll('input.ws-price-text-input')).filter((el) => !el.readOnly)[0] || null;
+  }
+
+  function readInputPrice(input) {
+    const raw = String(input.value).replace(/,/g, '').trim();
+    // 只接受十进制数;输入过程中的 "1." 也按 1 处理,单独的 "." 或空值不显示提示
+    if (!/^\d+(\.\d*)?$/.test(raw)) return null;
+    return Number(raw);
+  }
+
+  // 输入框下方追加提示:提价上限 1.2 倍,并把上限、当前值都折合为人民币
+  function decorateInputPriceHint(input) {
+    const col = input.closest('.ws-price-input-col') || input.parentElement;
+    if (!col) return;
+
+    let hint = col.querySelector('.a6cny-input-hint');
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'ws-price-factor-line a6cny-input-hint';
+      const factor = col.querySelector('.ws-price-factor-line');
+      if (factor) factor.insertAdjacentElement('afterend', hint);
+      else col.appendChild(hint);
+    }
+
+    const value = readInputPrice(input);
+    const signature = (rateState.rate || (rateState.error ? 'error' : 'pending')) + '|' + value;
+    if (hint.dataset.signature === signature) return;
+    hint.dataset.signature = signature;
+
+    hint.textContent = '';
+    hint.classList.remove('is-pending', 'is-error');
+    hint.removeAttribute('title');
+    // 清空或输入了非数字时不显示提示
+    if (value === null) return;
+
+    const capped = value * MAX_RAISE_FACTOR;
+    const cnyOf = (usd) => (rateState.rate > 0 ? '（' + formatCny(usd) + '）' : '');
+    hint.append('× 1.2 = $' + formatUsd(capped) + cnyOf(capped));
+
+    if (rateState.rate > 0) {
+      hint.title = '提价上限 = 输入价 × 1.2;括号内为按实时汇率折合的人民币';
+    } else if (rateState.error) {
+      hint.classList.add('is-error');
+      hint.title = rateState.error;
+    } else {
+      hint.classList.add('is-pending');
+      schedulePendingRefresh();
+    }
+  }
+
+  // 去掉浮点尾数:2.5 × 1.2 会得到 3.0000000000000004,输入 1.234567 则保留到 6 位小数
+  function formatUsd(value) {
+    if (!String(value).includes('.')) return String(value);
+    const text = value.toFixed(6).replace(/0+$/, '');
+    return text.endsWith('.') ? text.slice(0, -1) : text;
   }
 
   // ---------- 表格行 ----------
@@ -437,6 +526,9 @@
     decorateAllRows();
     document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
 
+    const inputPrice = findInputPriceField();
+    if (inputPrice) decorateInputPriceHint(inputPrice);
+
     groups.forEach(ensureRatePill);
     if (!groups.length) {
       // 未登录或页面还在加载、没有数据胶囊时,把汇率挂在表格卡片上,便于确认脚本正在运行
@@ -470,6 +562,18 @@
   function init() {
     injectStyles();
     document.addEventListener('a6cny:rate', updateAll);
+
+    // 输入框的值不体现在 HTML 属性上,MutationObserver 观察不到,需要单独监听输入事件
+    document.addEventListener(
+      'input',
+      (event) => {
+        if (event.target && event.target.matches && event.target.matches('.ws-price-inputs-grid input')) {
+          const inputPrice = findInputPriceField();
+          if (inputPrice) decorateInputPriceHint(inputPrice);
+        }
+      },
+      true,
+    );
 
     const observer = new MutationObserver(onMutations);
     observer.observe(document.body, {
