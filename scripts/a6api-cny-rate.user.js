@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.4.0
+// @version      0.4.1
 // @description  按实时美元汇率换算 A6api 的收益与价格(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
@@ -26,6 +26,8 @@
     renderWaitMs: 8000,
     // MutationObserver 全量刷新的节流间隔
     throttleMs: 150,
+    // 首屏渲染完成后再等这么久才请求汇率,错开首屏动画
+    initialRefreshDelayMs: 600,
   };
 
   const ENDPOINTS = [
@@ -117,27 +119,32 @@
     throw new Error(errors.join('; '));
   }
 
-  function loadRate() {
-    if (ratePromise) return ratePromise;
-
+  // 页面加载时只读缓存,不发网络请求:首屏渲染期间网络回调会打断一次帧,
+  // 表现为顶部胶囊「闪」一下。请求放到首屏稳定之后,由 startRefresh 触发
+  function loadCachedRate() {
     const cached = readCache();
     if (cached && cached.rate > 0) {
       // 旧版本缓存里可能是完整汇率,统一按 2 位小数使用
       rateState = { ...cached, rate: roundRate(cached.rate) };
-      if (Date.now() - (cached.cachedAt || 0) < CONFIG.cacheTtlMs) {
-        ratePromise = Promise.resolve(rateState);
-        return ratePromise;
-      }
     }
+  }
 
+  function isRateFresh() {
+    return Date.now() - (rateState.cachedAt || 0) < CONFIG.cacheTtlMs;
+  }
+
+  function requestRate() {
+    if (ratePromise) return ratePromise;
     ratePromise = fetchRate()
       .then((value) => {
         rateState = { ...value };
-        document.dispatchEvent(new CustomEvent('a6cny:rate'));
+        notifyRateChanged();
         return rateState;
       })
       .catch((e) => {
         rateState.error = e.message;
+        // 失败也要重绘一次,否则界面会一直停在「加载中」
+        notifyRateChanged();
         // 有新数据前先用旧缓存(任意时间),保证页面仍能看到换算值
         if (!(rateState.rate > 0)) {
           ratePromise = null;
@@ -145,13 +152,16 @@
         }
         return rateState;
       });
-
     return ratePromise;
+  }
+
+  function notifyRateChanged() {
+    document.dispatchEvent(new CustomEvent('a6cny:rate'));
   }
 
   function reloadRate() {
     ratePromise = null;
-    loadRate().then(updateAll);
+    return requestRate().then(() => updateAll());
   }
 
   // ---------- 工具 ----------
@@ -243,6 +253,12 @@
   }
 
   // 用页面自身的胶囊样式作为模板生成人民币标签,保证字体、圆角、间距与原页面一致
+  function makeNode(tag, className) {
+    const el = document.createElement(tag);
+    el.className = className;
+    return el;
+  }
+
   function createPill(valueText) {
     const template = document.querySelector('.cl-capsules-group .cl-capsule');
     const pill = template ? template.cloneNode(false) : document.createElement('div');
@@ -254,11 +270,12 @@
     if (template) {
       const labelSrc = template.querySelector('.cl-capsule-label');
       const valSrc = template.querySelector('.cl-capsule-val');
-      pill.appendChild(labelSrc ? labelSrc.cloneNode(true) : document.createElement('span'));
-      pill.appendChild(valSrc ? valSrc.cloneNode(true) : document.createElement('strong'));
+      pill.appendChild(labelSrc ? labelSrc.cloneNode(true) : makeNode('span', 'cl-capsule-label'));
+      pill.appendChild(valSrc ? valSrc.cloneNode(true) : makeNode('strong', 'cl-capsule-val'));
     } else {
-      pill.appendChild(document.createElement('span'));
-      pill.appendChild(document.createElement('strong'));
+      // 页面上还没有可参照的胶囊时,自己补出带 class 的结构,保证后续能按 class 定位
+      pill.appendChild(makeNode('span', 'cl-capsule-label'));
+      pill.appendChild(makeNode('strong', 'cl-capsule-val'));
     }
 
     const label = pill.querySelector('.cl-capsule-label');
@@ -335,6 +352,24 @@
     return value ? parseUsd(value.textContent) : null;
   }
 
+  // 胶囊后紧跟的换算标签:存在且唯一时直接复用,避免每轮刷新都删掉重建导致闪烁
+  function takePillSlot(capsule) {
+    let next = capsule.nextElementSibling;
+    if (!next || !next.classList.contains('a6cny-pill')) {
+      const fresh = createPill('');
+      capsule.insertAdjacentElement('afterend', fresh);
+      return fresh;
+    }
+    // 多余的重复标签(Vue 克隆旧节点时可能带出来)一并清理
+    let extra = next.nextElementSibling;
+    while (extra && extra.classList.contains('a6cny-pill')) {
+      const toRemove = extra;
+      extra = extra.nextElementSibling;
+      toRemove.remove();
+    }
+    return next;
+  }
+
   function decorateCapsule(capsule) {
     const label = capsule.querySelector('.cl-capsule-label');
     const value = capsule.querySelector('.cl-capsule-val');
@@ -343,27 +378,28 @@
     const name = label.textContent.trim();
     if (name !== '今日应得' && name !== '本月应得') return;
 
-    // 先清掉胶囊内(含紧跟其后)的旧标签,再重新插入:Vue 原地复用节点时旧标签会残留
+    // Vue 原地复用节点时,标签可能被塞进胶囊内部,移除即可
     capsule.querySelectorAll('.a6cny-pill').forEach((el) => el.remove());
-    let next = capsule.nextElementSibling;
-    while (next && next.classList.contains('a6cny-pill')) {
-      const toRemove = next;
-      next = next.nextElementSibling;
-      toRemove.remove();
-    }
 
     const usd = readCapsuleUsd(capsule);
     if (usd === null) return;
-    let pill;
+
+    let text;
     if (rateState.rate > 0) {
-      pill = createPill(formatCny(usd));
+      text = formatCny(usd);
     } else {
-      pill = createPill(rateState.error ? '汇率获取失败' : '汇率加载中');
+      text = rateState.error ? '汇率获取失败' : '汇率加载中';
       schedulePendingRefresh();
     }
+
+    const pill = takePillSlot(capsule);
+    // 文本没变就什么都不做:改动 DOM 会触发自身的 MutationObserver,形成反复刷新的循环
+    if (pill.dataset.usd === String(usd) && pill.dataset.text === text) return;
     pill.dataset.usd = String(usd);
-    // pill 是刚创建的新节点,直接插入不会发生「移动已有节点」
-    capsule.insertAdjacentElement('afterend', pill);
+    pill.dataset.text = text;
+    const valueEl = pill.querySelector('.cl-capsule-val');
+    if (valueEl.textContent !== text) valueEl.textContent = text;
+    pill.title = describeRate();
   }
 
   // ---------- 编辑模型弹窗:原价 ----------
@@ -533,19 +569,30 @@
   }
 
   function applyTag(tag, usd) {
+    let text;
+    let state;
     if (rateState.rate > 0) {
-      tag.textContent = '≈ ' + formatCny(usd);
-      tag.classList.remove('is-pending', 'is-error');
-      tag.title = describeRate();
+      text = '≈ ' + formatCny(usd);
+      state = 'ok';
     } else if (rateState.error) {
-      tag.textContent = '≈ 汇率获取失败';
-      tag.classList.add('is-error');
-      tag.classList.remove('is-pending');
-      tag.title = rateState.error;
+      text = '≈ 汇率获取失败';
+      state = 'error';
     } else {
-      tag.textContent = '≈ 加载中';
-      tag.classList.add('is-pending');
-      tag.classList.remove('is-error');
+      text = '≈ 加载中';
+      state = 'pending';
+    }
+
+    // 内容和状态都没变就不碰 DOM,否则每次刷新都会触发自身的 MutationObserver
+    const signature = state + '|' + usd;
+    if (tag.dataset.signature === signature) return;
+    tag.dataset.signature = signature;
+
+    tag.textContent = text;
+    tag.classList.toggle('is-pending', state === 'pending');
+    tag.classList.toggle('is-error', state === 'error');
+    if (state === 'ok') tag.title = describeRate();
+    else if (state === 'error') tag.title = rateState.error;
+    else {
       tag.title = '正在获取实时汇率';
       schedulePendingRefresh();
     }
@@ -568,11 +615,15 @@
       pill.remove();
       return;
     }
-    pill.querySelector('.cl-capsule-val').textContent =
+    const text =
       rateState.rate > 0 ? formatCny(1) + '/USD' : rateState.error ? '获取失败' : '加载中';
-    pill.title = describeRate();
+    const valueEl = pill.querySelector('.cl-capsule-val');
+    if (valueEl.textContent !== text) valueEl.textContent = text;
+    const title = describeRate();
+    if (pill.title !== title) pill.title = title;
   }
 
+  // 各 decorate 函数内部比较签名,内容没变就不改 DOM,所以这里可以放心全量调用
   function updateAll() {
     const groups = document.querySelectorAll('.cl-capsules-group');
     // 只选原页面的胶囊:新标签复用了 .cl-capsule 类,不过滤会被当成源数据
@@ -605,8 +656,8 @@
   let flushTimer = 0;
 
   // 页面每次变化都节流触发一次全量刷新:收益单元格可能原地改文本(不新增节点),
-  // 只看 addedNodes 会漏掉。脚本自己插入的节点也会引发回调,但 decorateCapsule 会先清掉
-  // 旧标签再插入,decorateRowCell 会复用已有标签,重复执行的结果不变,不会累积节点。
+  // 只看 addedNodes 会漏掉。脚本自己插入的节点也会引发回调,但各 decorate 函数
+  // 文本未变时不改动 DOM,所以不会形成「改动 → 回调 → 再改动」的自激循环。
   function onMutations() {
     if (flushTimer) return;
     flushTimer = setTimeout(() => {
@@ -615,8 +666,25 @@
     }, CONFIG.throttleMs);
   }
 
+  // 首屏渲染完成后(load 事件 + 一小段静默期)再拉汇率,避免网络回调正好落在首屏渲染中间造成闪动
+  function startRefresh() {
+    const begin = () => {
+      setTimeout(() => {
+        if (isRateFresh()) {
+          updateAll();
+          return;
+        }
+        requestRate();
+      }, CONFIG.initialRefreshDelayMs);
+    };
+    if (document.readyState === 'complete') begin();
+    else window.addEventListener('load', begin, { once: true });
+  }
+
   function init() {
     injectStyles();
+    // 汇率到达后强制重算一次(与缓存的汇率不同时内容需要更新)
+    // 汇率到达(或失败)后重绘一次;内容未变的节点不会被改动
     document.addEventListener('a6cny:rate', updateAll);
 
     // 输入框的值不体现在 HTML 属性上,MutationObserver 观察不到,需要单独监听输入事件
@@ -631,6 +699,10 @@
       true,
     );
 
+    loadCachedRate();
+    // 先按缓存渲染首屏(无网络回调,不会打断帧),再在首屏稳定后更新汇率
+    updateAll();
+
     const observer = new MutationObserver(onMutations);
     observer.observe(document.body, {
       childList: true,
@@ -639,7 +711,7 @@
       attributeFilter: ['class', 'style'],
     });
 
-    loadRate().then(updateAll);
+    startRefresh();
   }
 
   if (document.body) {
