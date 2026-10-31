@@ -19,7 +19,7 @@
 
 | 脚本 | 说明 |
 | --- | --- |
-| [`a6api-cny-rate.user.js`](scripts/a6api-cny-rate.user.js) | A6api 人民币换算:汇率取 2 位小数、结果保留完整小数;覆盖日志页收益、编辑弹窗「原价」与输入价 ×1.2 提价上限 |
+| [`a6api-cny-rate.user.js`](scripts/a6api-cny-rate.user.js) | A6api 人民币换算:汇率取 2 位小数、结果保留完整小数;日志页人民币直接并入原胶囊,并覆盖表格收益、编辑弹窗「原价」与输入价 ×1.2 提价上限 |
 | [`example.user.js`](scripts/example.user.js) | 示例脚本,在页面右下角显示悬浮标签 |
 
 ## 新建脚本

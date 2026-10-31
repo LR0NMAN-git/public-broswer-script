@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.4.1
+// @version      0.5.0
 // @description  按实时美元汇率换算 A6api 的收益与价格(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
@@ -252,43 +252,10 @@
     return String(n).padStart(2, '0');
   }
 
-  // 用页面自身的胶囊样式作为模板生成人民币标签,保证字体、圆角、间距与原页面一致
   function makeNode(tag, className) {
     const el = document.createElement(tag);
     el.className = className;
     return el;
-  }
-
-  function createPill(valueText) {
-    const template = document.querySelector('.cl-capsules-group .cl-capsule');
-    const pill = template ? template.cloneNode(false) : document.createElement('div');
-    pill.classList.remove('is-active-primary');
-    pill.classList.add('a6cny-pill');
-    pill.removeAttribute('style');
-    pill.title = describeRate();
-
-    if (template) {
-      const labelSrc = template.querySelector('.cl-capsule-label');
-      const valSrc = template.querySelector('.cl-capsule-val');
-      pill.appendChild(labelSrc ? labelSrc.cloneNode(true) : makeNode('span', 'cl-capsule-label'));
-      pill.appendChild(valSrc ? valSrc.cloneNode(true) : makeNode('strong', 'cl-capsule-val'));
-    } else {
-      // 页面上还没有可参照的胶囊时,自己补出带 class 的结构,保证后续能按 class 定位
-      pill.appendChild(makeNode('span', 'cl-capsule-label'));
-      pill.appendChild(makeNode('strong', 'cl-capsule-val'));
-    }
-
-    const label = pill.querySelector('.cl-capsule-label');
-    const value = pill.querySelector('.cl-capsule-val');
-    label.textContent = '≈ 人民币';
-    value.textContent = valueText;
-    return pill;
-  }
-
-  function createRatePill() {
-    const pill = createPill(rateState.rate > 0 ? formatCny(1) + '/USD' : '—');
-    pill.classList.add('a6cny-rate-pill');
-    return pill;
   }
 
   // ---------- 样式 ----------
@@ -300,9 +267,9 @@
     const style = document.createElement('style');
     style.id = 'a6cny-style';
     style.textContent = `
-      /* 琥珀色区别于页面原有的绿色收益,同时与原样式表的选择器权重持平,靠加载顺序生效 */
-      html .a6cny-pill .cl-capsule-val { color: #d97706; }
-      html[data-theme="dark"] .a6cny-pill .cl-capsule-val { color: #fbbf24; }
+      /* 塞进原胶囊内的人民币:紧跟美元金额,用琥珀色区别于原有的绿色收益 */
+      .cl-capsule-val .a6cny-cny { margin-left: 6px; color: #d97706; font-weight: 500; }
+      html[data-theme="dark"] .cl-capsule-val .a6cny-cny { color: #fbbf24; }
 
       .a6cny-tag {
         display: inline-block;
@@ -346,30 +313,18 @@
 
   // ---------- 顶部胶囊 ----------
 
-  // 读取胶囊的金额:换算标签复用了 .cl-capsule 结构,仅从原胶囊自身的金额节点读取
+  // 读取胶囊的美元金额。金额节点里可能被塞入人民币子元素,只取原始文本节点拼接后的金额
   function readCapsuleUsd(capsule) {
     const value = capsule.querySelector('.cl-capsule-val');
-    return value ? parseUsd(value.textContent) : null;
+    if (!value) return null;
+    const own = Array.from(value.childNodes)
+      .filter((n) => !(n.nodeType === 1 && n.classList.contains('a6cny-cny')))
+      .map((n) => n.textContent)
+      .join('');
+    return parseUsd(own);
   }
 
-  // 胶囊后紧跟的换算标签:存在且唯一时直接复用,避免每轮刷新都删掉重建导致闪烁
-  function takePillSlot(capsule) {
-    let next = capsule.nextElementSibling;
-    if (!next || !next.classList.contains('a6cny-pill')) {
-      const fresh = createPill('');
-      capsule.insertAdjacentElement('afterend', fresh);
-      return fresh;
-    }
-    // 多余的重复标签(Vue 克隆旧节点时可能带出来)一并清理
-    let extra = next.nextElementSibling;
-    while (extra && extra.classList.contains('a6cny-pill')) {
-      const toRemove = extra;
-      extra = extra.nextElementSibling;
-      toRemove.remove();
-    }
-    return next;
-  }
-
+  // 把人民币追加到原胶囊内部、紧跟美元金额之后,不新增胶囊
   function decorateCapsule(capsule) {
     const label = capsule.querySelector('.cl-capsule-label');
     const value = capsule.querySelector('.cl-capsule-val');
@@ -378,28 +333,37 @@
     const name = label.textContent.trim();
     if (name !== '今日应得' && name !== '本月应得') return;
 
-    // Vue 原地复用节点时,标签可能被塞进胶囊内部,移除即可
-    capsule.querySelectorAll('.a6cny-pill').forEach((el) => el.remove());
+    // 只有金额节点里第一层的人民币节点是有效的;Vue 原地复用可能留下重复节点,一并清理
+    const extra = Array.from(value.children).filter((el) => el.classList.contains('a6cny-cny'));
+    const cny = extra.shift();
+    extra.forEach((el) => el.remove());
 
     const usd = readCapsuleUsd(capsule);
     if (usd === null) return;
 
-    let text;
-    if (rateState.rate > 0) {
-      text = formatCny(usd);
-    } else {
-      text = rateState.error ? '汇率获取失败' : '汇率加载中';
-      schedulePendingRefresh();
-    }
+    const cnyEl = cny || makeNode('span', 'a6cny-cny');
+    const text = rateTextFor(usd);
 
-    const pill = takePillSlot(capsule);
-    // 文本没变就什么都不做:改动 DOM 会触发自身的 MutationObserver,形成反复刷新的循环
-    if (pill.dataset.usd === String(usd) && pill.dataset.text === text) return;
-    pill.dataset.usd = String(usd);
-    pill.dataset.text = text;
-    const valueEl = pill.querySelector('.cl-capsule-val');
-    if (valueEl.textContent !== text) valueEl.textContent = text;
-    pill.title = describeRate();
+    // 内容没变就什么都不做:改动 DOM 会触发自身的 MutationObserver,形成反复刷新的循环
+    if (cnyEl.dataset.usd === String(usd) && cnyEl.dataset.text === text) {
+      if (!cnyEl.isConnected) value.appendChild(cnyEl);
+      return;
+    }
+    cnyEl.dataset.usd = String(usd);
+    cnyEl.dataset.text = text;
+    if (cnyEl.textContent !== text) cnyEl.textContent = text;
+    const baseTitle = '实时汇率折合';
+    const rate = rateState.rate > 0 ? describeRate() : rateState.error || '';
+    const title = rate ? baseTitle + ' · ' + rate : baseTitle;
+    if (cnyEl.title !== title) cnyEl.title = title;
+    if (!cnyEl.isConnected) value.appendChild(cnyEl);
+  }
+
+  function rateTextFor(usd) {
+    if (rateState.rate > 0) return '≈ ' + formatCny(usd);
+    if (rateState.error) return '≈ 汇率获取失败';
+    schedulePendingRefresh();
+    return '≈ 加载中';
   }
 
   // ---------- 编辑模型弹窗:原价 ----------
@@ -606,49 +570,16 @@
     document.querySelectorAll('.cl-cell-earnings').forEach(decorateRowCell);
   }
 
-  // 「汇率」兜底胶囊只用于没有数据胶囊的页面,且必须挂在表格卡片上,
-  // 否则会出现在 .cl-capsules-group 里,需要在 updateAll 中清理掉
-  function ensureRatePill(container) {
-    const pill = container.querySelector(':scope > .a6cny-rate-pill');
-    if (!pill) return;
-    if (container.classList.contains('cl-capsules-group')) {
-      pill.remove();
-      return;
-    }
-    const text =
-      rateState.rate > 0 ? formatCny(1) + '/USD' : rateState.error ? '获取失败' : '加载中';
-    const valueEl = pill.querySelector('.cl-capsule-val');
-    if (valueEl.textContent !== text) valueEl.textContent = text;
-    const title = describeRate();
-    if (pill.title !== title) pill.title = title;
-  }
-
   // 各 decorate 函数内部比较签名,内容没变就不改 DOM,所以这里可以放心全量调用
   function updateAll() {
     const groups = document.querySelectorAll('.cl-capsules-group');
-    // 只选原页面的胶囊:新标签复用了 .cl-capsule 类,不过滤会被当成源数据
-    groups.forEach((group) =>
-      group.querySelectorAll('.cl-capsule:not(.a6cny-pill)').forEach(decorateCapsule));
+    groups.forEach((group) => group.querySelectorAll('.cl-capsule').forEach(decorateCapsule));
 
     decorateAllRows();
     document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
 
     const inputPrice = findInputPriceField();
     if (inputPrice) decorateInputPriceHint(inputPrice);
-
-    groups.forEach(ensureRatePill);
-    if (!groups.length) {
-      // 未登录或页面还在加载、没有数据胶囊时,把汇率挂在表格卡片上,便于确认脚本正在运行
-      const card = document.querySelector('.cl-table-card');
-      if (card) {
-        let pill = card.querySelector(':scope > .a6cny-rate-pill');
-        if (!pill) {
-          pill = createRatePill();
-          card.appendChild(pill);
-        }
-        ensureRatePill(card);
-      }
-    }
   }
 
   // ---------- 启动 ----------
