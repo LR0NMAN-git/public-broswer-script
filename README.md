@@ -19,7 +19,7 @@
 
 | 脚本 | 说明 |
 | --- | --- |
-| [`a6api-cny-rate.user.js`](scripts/a6api-cny-rate.user.js) | A6api 商户日志页:按实时美元汇率,在「今日应得 / 本月应得」胶囊和每行「收益」旁追加等值人民币标签 |
+| [`a6api-cny-rate.user.js`](scripts/a6api-cny-rate.user.js) | A6api 人民币换算:日志页「今日应得 / 本月应得」与每行「收益」、编辑模型弹窗「原价」下方,按实时汇率追加人民币 |
 | [`example.user.js`](scripts/example.user.js) | 示例脚本,在页面右下角显示悬浮标签 |
 
 ## 新建脚本

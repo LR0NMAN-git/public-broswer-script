@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.1.0
-// @description  按实时美元汇率,在 A6api 商户日志页的「今日应得 / 本月应得」及每行「收益」旁追加等值人民币标签
+// @version      0.2.0
+// @description  按实时美元汇率,在 A6api 的收益胶囊/日志行收益,以及编辑模型弹窗的「原价」下方追加等值人民币
 // @author       LR
 // @match        https://a6api.vip/*
 // @grant        GM_getValue
@@ -33,8 +33,7 @@
       name: 'exchangerate-api',
       url: 'https://api.exchangerate-api.com/v4/latest/USD',
       parse: (data) => ({
-        // 普通浮点值,只保留 4 位有效数字,避免显示 6.67000000001
-        rate: Number(data.rates.CNY.toPrecision(4)),
+        rate: Number(data.rates.CNY),
         updatedAt: (data.time_last_updated || 0) * 1000,
       }),
     },
@@ -44,7 +43,7 @@
       parse: (data) => {
         if (data.result !== 'success') throw new Error(data['error-type'] || '接口返回异常');
         return {
-          rate: Number(data.rates.CNY.toPrecision(4)),
+          rate: Number(data.rates.CNY),
           updatedAt: (data.time_last_update_unix || 0) * 1000,
         };
       },
@@ -154,10 +153,11 @@
 
   // ---------- 工具 ----------
 
-  // "$547.009436" -> 547.009436
+  // "$547.009436" -> 547.009436;优先取 $ 后面的金额,没有 $ 才退回取第一个数字
   function parseUsd(text) {
-    const m = String(text).replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
-    return m ? Number(m[0]) : null;
+    const s = String(text).replace(/,/g, '');
+    const m = s.match(/\$\s*(-?\d+(?:\.\d+)?)/) || s.match(/(-?\d+(?:\.\d+)?)/);
+    return m ? Number(m[1]) : null;
   }
 
   // 按每行的量级选择小数位:单行收益经常低于 0.01,固定 2 位会显示成 ¥0.00
@@ -253,6 +253,12 @@
       }
       .a6cny-tag.is-pending { color: #6b7280; background: rgba(107, 114, 128, 0.12); }
       .a6cny-tag.is-error { color: #dc2626; background: rgba(220, 38, 38, 0.1); }
+
+      /* 编辑弹窗「原价折合」行:沿用原价行的排版,只给金额上色 */
+      .a6cny-price-line .a6cny-price-value { color: #b45309; font-variant-numeric: tabular-nums; }
+      .a6cny-price-line .is-pending { color: #6b7280; }
+      .a6cny-price-line .is-error { color: #dc2626; }
+      html[data-theme="dark"] .a6cny-price-line .a6cny-price-value { color: #fbbf24; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -294,6 +300,64 @@
     pill.dataset.usd = String(usd);
     // pill 是刚创建的新节点,直接插入不会发生「移动已有节点」
     capsule.insertAdjacentElement('afterend', pill);
+  }
+
+  // ---------- 编辑模型弹窗:原价 ----------
+
+  // "输入 $2.5 / 输出 $12.5 / 缓存读 $0.25 / 缓存写 $3.125" -> [{label: '输入', usd: 2.5}, ...]
+  function parseOriginalPrices(line) {
+    const parts = [];
+    for (const el of line.querySelectorAll('span:not(.ws-original-price-key)')) {
+      const text = el.textContent.trim();
+      const usd = parseUsd(text);
+      if (usd === null) continue;
+      const label = text.replace(/\$\s*-?\d.*$/, '').trim();
+      parts.push({ label, usd });
+    }
+    return parts;
+  }
+
+  // 只返回值本身,单位由调用方拼接
+  function formatPriceValue(part) {
+    if (rateState.rate > 0) return formatCny(part.usd);
+    return rateState.error ? '获取失败' : '加载中';
+  }
+
+  // 在「原价」行下方插入一行人民币换算,结构参照原价行,样式沿用页面自身的类
+  function decorateOriginalPrice(line) {
+    const parts = parseOriginalPrices(line);
+    if (!parts.length) return;
+
+    let row = line.nextElementSibling;
+    if (!row || !row.classList.contains('a6cny-price-line')) {
+      row = document.createElement('div');
+      row.className = 'ws-original-price-line a6cny-price-line';
+      line.insertAdjacentElement('afterend', row);
+    }
+
+    // 金额没变且汇率已就绪就不重建,避免每轮刷新都改动 DOM 触发自身观察
+    const signature = (rateState.rate || (rateState.error ? 'error' : 'pending')) + '|' + parts.map((p) => p.usd).join('|');
+    if (row.dataset.signature === signature) return;
+    row.dataset.signature = signature;
+
+    row.textContent = '';
+    const key = document.createElement('span');
+    key.className = 'ws-original-price-key';
+    key.textContent = '原价折合';
+    row.appendChild(key);
+    parts.forEach((part, i) => {
+      if (i > 0) row.appendChild(document.createTextNode(' / '));
+      const value = document.createElement('span');
+      value.textContent = part.label + ' ≈ ' + formatPriceValue(part);
+      if (rateState.rate > 0) {
+        value.classList.add('a6cny-price-value');
+        value.title = describeRate();
+      } else {
+        value.classList.add(rateState.error ? 'is-error' : 'is-pending');
+        if (!rateState.error) schedulePendingRefresh();
+      }
+      row.appendChild(value);
+    });
   }
 
   // ---------- 表格行 ----------
@@ -371,6 +435,7 @@
       group.querySelectorAll('.cl-capsule:not(.a6cny-pill)').forEach(decorateCapsule));
 
     decorateAllRows();
+    document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
 
     groups.forEach(ensureRatePill);
     if (!groups.length) {
