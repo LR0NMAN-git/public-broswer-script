@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.5.0
+// @version      0.5.1
 // @description  按实时美元汇率换算 A6api 的收益与价格(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
@@ -366,7 +366,7 @@
     return '≈ 加载中';
   }
 
-  // ---------- 编辑模型弹窗:原价 ----------
+  // ---------- 编辑模型弹窗:折合价 ----------
 
   // "输入 $2.5 / 输出 $12.5 / 缓存读 $0.25 / 缓存写 $3.125" -> [{label: '输入', usd: 2.5}, ...]
   function parseOriginalPrices(line) {
@@ -381,6 +381,26 @@
     return parts;
   }
 
+  // 读取输入区的实时价格:输入价取可编辑框,输出/缓存读/缓存写取自动计算的只读框。
+  // 输入区还没渲染时返回 null,调用方退回使用原价行的金额
+  function readCurrentPrices() {
+    const grid = document.querySelector('.ws-price-inputs-grid');
+    if (!grid) return null;
+    const cols = Array.from(grid.querySelectorAll('.ws-price-input-col'));
+    if (cols.length < 4) return null;
+
+    const labels = ['输入', '输出', '缓存读', '缓存写'];
+    const parts = [];
+    for (let i = 0; i < 4; i += 1) {
+      const input = cols[i].querySelector('input');
+      const usd = input ? readInputPrice(input) : null;
+      // 任一格为空或未填完时不做换算,避免显示半成品数字
+      if (usd === null) return null;
+      parts.push({ label: labels[i], usd });
+    }
+    return parts;
+  }
+
   // 只返回值本身,单位由调用方拼接
   function formatPriceValue(part) {
     if (rateState.rate > 0) return formatCny(part.usd);
@@ -388,7 +408,7 @@
   }
 
   // 同一份 DOM 里只保留一行折合价:快照里可能已经带着上一次运行留下的行,
-  // 胶囊组被整体重建时也可能把旧行克隆过来
+  // 或页面重建时把旧行克隆过来
   function removeDuplicatePriceLines(line) {
     const next = line.nextElementSibling;
     if (!next || !next.classList.contains('a6cny-price-line')) return null;
@@ -402,10 +422,15 @@
     return row;
   }
 
-  // 在「原价」行下方插入一行人民币换算,结构参照原价行,样式沿用页面自身的类
+  // 在「原价」行下方维护一行人民币折合。金额优先取输入区的实时值,随输入框变化重算
   function decorateOriginalPrice(line) {
-    const parts = parseOriginalPrices(line);
-    if (!parts.length) return;
+    const saved = parseOriginalPrices(line);
+    if (!saved.length) return;
+
+    // 输入区没有渲染或还没填完时,退回显示已保存原价的折合
+    const current = readCurrentPrices();
+    const parts = current || saved;
+    const useCurrent = !!current;
 
     let row = removeDuplicatePriceLines(line);
     if (!row) {
@@ -415,14 +440,17 @@
     }
 
     // 金额没变且汇率已就绪就不重建,避免每轮刷新都改动 DOM 触发自身观察
-    const signature = (rateState.rate || (rateState.error ? 'error' : 'pending')) + '|' + parts.map((p) => p.usd).join('|');
+    const signature =
+      (rateState.rate || (rateState.error ? 'error' : 'pending')) +
+      '|' + (useCurrent ? 'live' : 'saved') +
+      '|' + parts.map((p) => p.usd).join('|');
     if (row.dataset.signature === signature) return;
     row.dataset.signature = signature;
 
     row.textContent = '';
     const key = document.createElement('span');
     key.className = 'ws-original-price-key';
-    key.textContent = '原价折合';
+    key.textContent = useCurrent ? '按填价折合' : '原价折合';
     row.appendChild(key);
     parts.forEach((part, i) => {
       if (i > 0) row.appendChild(document.createTextNode(' / '));
@@ -570,13 +598,18 @@
     document.querySelectorAll('.cl-cell-earnings').forEach(decorateRowCell);
   }
 
+  // 折合行依赖输入区的实时值,输入变化时单独调用一次
+  function decoratePriceLines() {
+    document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
+  }
+
   // 各 decorate 函数内部比较签名,内容没变就不改 DOM,所以这里可以放心全量调用
   function updateAll() {
     const groups = document.querySelectorAll('.cl-capsules-group');
     groups.forEach((group) => group.querySelectorAll('.cl-capsule').forEach(decorateCapsule));
 
     decorateAllRows();
-    document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
+    decoratePriceLines();
 
     const inputPrice = findInputPriceField();
     if (inputPrice) decorateInputPriceHint(inputPrice);
@@ -622,10 +655,10 @@
     document.addEventListener(
       'input',
       (event) => {
-        if (event.target && event.target.matches && event.target.matches('.ws-price-inputs-grid input')) {
-          const inputPrice = findInputPriceField();
-          if (inputPrice) decorateInputPriceHint(inputPrice);
-        }
+        if (!(event.target && event.target.matches && event.target.matches('.ws-price-inputs-grid input'))) return;
+        const inputPrice = findInputPriceField();
+        if (inputPrice) decorateInputPriceHint(inputPrice);
+        decoratePriceLines();
       },
       true,
     );
