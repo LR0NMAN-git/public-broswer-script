@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         A6api 收益人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.3.0
-// @description  按实时美元汇率换算 A6api 的收益与价格,并在编辑模型弹窗显示原价折合、输入价 ×1.2 提价上限
+// @version      0.4.0
+// @description  按实时美元汇率换算 A6api 的收益与价格(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
 // @grant        GM_getValue
@@ -33,7 +33,8 @@
       name: 'exchangerate-api',
       url: 'https://api.exchangerate-api.com/v4/latest/USD',
       parse: (data) => ({
-        rate: Number(data.rates.CNY),
+        // 汇率统一按 2 位小数参与计算,与显示保持一致
+        rate: roundRate(data.rates.CNY),
         updatedAt: (data.time_last_updated || 0) * 1000,
       }),
     },
@@ -43,7 +44,7 @@
       parse: (data) => {
         if (data.result !== 'success') throw new Error(data['error-type'] || '接口返回异常');
         return {
-          rate: Number(data.rates.CNY),
+          rate: roundRate(data.rates.CNY),
           updatedAt: (data.time_last_update_unix || 0) * 1000,
         };
       },
@@ -102,6 +103,7 @@
       try {
         const data = await requestJson(api.url);
         const parsed = api.parse(data);
+        // 按 2 位小数取整后仍须在合理区间,防止接口返回异常值
         if (!(parsed.rate > 0 && parsed.rate < 100)) {
           throw new Error('汇率值异常: ' + parsed.rate);
         }
@@ -120,7 +122,8 @@
 
     const cached = readCache();
     if (cached && cached.rate > 0) {
-      rateState = { ...cached };
+      // 旧版本缓存里可能是完整汇率,统一按 2 位小数使用
+      rateState = { ...cached, rate: roundRate(cached.rate) };
       if (Date.now() - (cached.cachedAt || 0) < CONFIG.cacheTtlMs) {
         ratePromise = Promise.resolve(rateState);
         return ratePromise;
@@ -160,20 +163,73 @@
     return m ? Number(m[1]) : null;
   }
 
-  // 按每行的量级选择小数位:单行收益经常低于 0.01,固定 2 位会显示成 ¥0.00
+  // 汇率统一保留 2 位小数,计算与显示使用同一个值
+  function roundRate(value) {
+    return Math.round(Number(value) * 100) / 100;
+  }
+
+  // 美元金额 -> 人民币文本。汇率已按 2 位小数取整,这里保留计算结果的完整小数。
+  // 先把两个因子转成整数相乘(各乘以 10^n),再按整数做十进制格式化,
+  // 避免 0.000156 * 6.67 得到 0.0010405199999999999 这类浮点尾数
   function formatCny(usd) {
-    const cny = usd * rateState.rate;
-    if (cny === 0) return '¥0.00';
-    const abs = Math.abs(cny);
-    let digits = 2;
-    if (abs < 0.01) digits = 4;
-    else if (abs < 1) digits = 3;
-    return '¥' + cny.toFixed(digits);
+    const rate = rateState.rate;
+    if (!(rate > 0)) return '';
+
+    const rateText = plainDecimal(rate);
+    const usdText = plainDecimal(usd);
+    if (!rateText || !usdText) {
+      // 极端量级(科学计数法)直接交给浮点,避免拼字符串出错
+      return '¥' + trimZeros(Number((usd * rate).toPrecision(15)));
+    }
+
+    const rateDecimals = decimalsOf(rateText);
+    const usdDecimals = decimalsOf(usdText);
+    const scale = rateDecimals + usdDecimals;
+    const product = toInt(usdText, usdDecimals) * toInt(rateText, rateDecimals);
+    return '¥' + trimZeros(formatInt(product, scale));
+  }
+
+  // 6.67 -> "6.67";科学计数法的值返回 null,由调用方走浮点分支
+  function plainDecimal(value) {
+    const text = String(value);
+    if (!/^-?\d+(\.\d+)?$/.test(text)) return null;
+    return text;
+  }
+
+  function decimalsOf(text) {
+    return (text.split('.')[1] || '').length;
+  }
+
+  // "2.5" 按 1 位小数 -> 25
+  function toInt(text, decimals) {
+    const negative = text.startsWith('-');
+    const [int, frac = ''] = (negative ? text.slice(1) : text).split('.');
+    const digits = (frac + '0'.repeat(decimals)).slice(0, decimals);
+    const value = Number(int + digits);
+    return negative ? -value : value;
+  }
+
+  // 整数 104052 配合 scale=8 -> "0.00104052"
+  function formatInt(product, scale) {
+    const negative = product < 0;
+    let digits = String(Math.abs(product)).padStart(scale + 1, '0');
+    if (scale > 0) {
+      digits = digits.slice(0, -scale) + '.' + digits.slice(-scale);
+    }
+    return (negative ? '-' : '') + digits;
+  }
+
+  // 去掉末尾多余的 0,但至少保留 2 位小数,保证金额看起来对齐
+  function trimZeros(text) {
+    if (!text.includes('.')) return text + '.00';
+    const trimmed = text.replace(/0+$/, '');
+    const frac = trimmed.split('.')[1] || '';
+    return trimmed + '0'.repeat(Math.max(0, 2 - frac.length));
   }
 
   function describeRate() {
     const parts = [];
-    if (rateState.rate > 0) parts.push('1 USD = ' + rateState.rate.toFixed(4) + ' CNY');
+    if (rateState.rate > 0) parts.push('1 USD = ' + rateState.rate.toFixed(2) + ' CNY');
     if (rateState.updatedAt) {
       const d = new Date(rateState.updatedAt);
       parts.push('汇率日期 ' + d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()));
