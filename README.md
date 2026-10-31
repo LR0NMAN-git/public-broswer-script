@@ -15,6 +15,13 @@
 
 本项目为**纯原生 UserScript**:每个脚本是独立的 `.user.js` 单文件,不依赖构建工具,可直接安装运行。
 
+## 脚本列表
+
+| 脚本 | 说明 |
+| --- | --- |
+| [`a6api-cny-rate.user.js`](scripts/a6api-cny-rate.user.js) | A6api 商户日志页:按实时美元汇率,在「今日应得 / 本月应得」胶囊和每行「收益」旁追加等值人民币标签 |
+| [`example.user.js`](scripts/example.user.js) | 示例脚本,在页面右下角显示悬浮标签 |
+
 ## 新建脚本
 
 复制模板并改名,然后修改文件头元数据:
