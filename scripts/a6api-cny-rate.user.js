@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         A6api 收益人民币换算
+// @name         A6api 人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.5.1
-// @description  按实时美元汇率换算 A6api 的收益与价格(汇率取 2 位小数,结果保留完整小数)
+// @version      0.6.0
+// @description  按实时美元汇率换算 A6api 日志页的收益与每行金额(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
 // @grant        GM_getValue
@@ -293,20 +293,6 @@
       }
       .a6cny-tag.is-pending { color: #6b7280; background: rgba(107, 114, 128, 0.12); }
       .a6cny-tag.is-error { color: #dc2626; background: rgba(220, 38, 38, 0.1); }
-
-      /* 编辑弹窗「原价折合」行:沿用原价行的排版,只给金额上色 */
-      .a6cny-price-line .a6cny-price-value { color: #b45309; font-variant-numeric: tabular-nums; }
-      .a6cny-price-line .is-pending { color: #6b7280; }
-      .a6cny-price-line .is-error { color: #dc2626; }
-      html[data-theme="dark"] .a6cny-price-line .a6cny-price-value { color: #fbbf24; }
-
-      /* 输入价下方提示:默认沿用页面 factor-line 的灰色,折合人民币部分单独标色 */
-      .a6cny-input-hint { color: #b45309; font-variant-numeric: tabular-nums; }
-      .a6cny-input-hint.is-pending { color: #6b7280; }
-      .a6cny-input-hint.is-error { color: #dc2626; }
-      html[data-theme="dark"] .a6cny-input-hint { color: #fbbf24; }
-      html[data-theme="dark"] .a6cny-input-hint.is-pending { color: #94a3b8; }
-      html[data-theme="dark"] .a6cny-input-hint.is-error { color: #f87171; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -364,173 +350,6 @@
     if (rateState.error) return '≈ 汇率获取失败';
     schedulePendingRefresh();
     return '≈ 加载中';
-  }
-
-  // ---------- 编辑模型弹窗:折合价 ----------
-
-  // "输入 $2.5 / 输出 $12.5 / 缓存读 $0.25 / 缓存写 $3.125" -> [{label: '输入', usd: 2.5}, ...]
-  function parseOriginalPrices(line) {
-    const parts = [];
-    for (const el of line.querySelectorAll('span:not(.ws-original-price-key)')) {
-      const text = el.textContent.trim();
-      const usd = parseUsd(text);
-      if (usd === null) continue;
-      const label = text.replace(/\$\s*-?\d.*$/, '').trim();
-      parts.push({ label, usd });
-    }
-    return parts;
-  }
-
-  // 读取输入区的实时价格:输入价取可编辑框,输出/缓存读/缓存写取自动计算的只读框。
-  // 输入区还没渲染时返回 null,调用方退回使用原价行的金额
-  function readCurrentPrices() {
-    const grid = document.querySelector('.ws-price-inputs-grid');
-    if (!grid) return null;
-    const cols = Array.from(grid.querySelectorAll('.ws-price-input-col'));
-    if (cols.length < 4) return null;
-
-    const labels = ['输入', '输出', '缓存读', '缓存写'];
-    const parts = [];
-    for (let i = 0; i < 4; i += 1) {
-      const input = cols[i].querySelector('input');
-      const usd = input ? readInputPrice(input) : null;
-      // 任一格为空或未填完时不做换算,避免显示半成品数字
-      if (usd === null) return null;
-      parts.push({ label: labels[i], usd });
-    }
-    return parts;
-  }
-
-  // 只返回值本身,单位由调用方拼接
-  function formatPriceValue(part) {
-    if (rateState.rate > 0) return formatCny(part.usd);
-    return rateState.error ? '获取失败' : '加载中';
-  }
-
-  // 同一份 DOM 里只保留一行折合价:快照里可能已经带着上一次运行留下的行,
-  // 或页面重建时把旧行克隆过来
-  function removeDuplicatePriceLines(line) {
-    const next = line.nextElementSibling;
-    if (!next || !next.classList.contains('a6cny-price-line')) return null;
-    let row = next;
-    let extra = row.nextElementSibling;
-    while (extra && extra.classList.contains('a6cny-price-line')) {
-      const toRemove = extra;
-      extra = extra.nextElementSibling;
-      toRemove.remove();
-    }
-    return row;
-  }
-
-  // 在「原价」行下方维护一行人民币折合。金额优先取输入区的实时值,随输入框变化重算
-  function decorateOriginalPrice(line) {
-    const saved = parseOriginalPrices(line);
-    if (!saved.length) return;
-
-    // 输入区没有渲染或还没填完时,退回显示已保存原价的折合
-    const current = readCurrentPrices();
-    const parts = current || saved;
-    const useCurrent = !!current;
-
-    let row = removeDuplicatePriceLines(line);
-    if (!row) {
-      row = document.createElement('div');
-      row.className = 'ws-original-price-line a6cny-price-line';
-      line.insertAdjacentElement('afterend', row);
-    }
-
-    // 金额没变且汇率已就绪就不重建,避免每轮刷新都改动 DOM 触发自身观察
-    const signature =
-      (rateState.rate || (rateState.error ? 'error' : 'pending')) +
-      '|' + (useCurrent ? 'live' : 'saved') +
-      '|' + parts.map((p) => p.usd).join('|');
-    if (row.dataset.signature === signature) return;
-    row.dataset.signature = signature;
-
-    row.textContent = '';
-    const key = document.createElement('span');
-    key.className = 'ws-original-price-key';
-    key.textContent = useCurrent ? '按填价折合' : '原价折合';
-    row.appendChild(key);
-    parts.forEach((part, i) => {
-      if (i > 0) row.appendChild(document.createTextNode(' / '));
-      const value = document.createElement('span');
-      value.textContent = part.label + ' ≈ ' + formatPriceValue(part);
-      if (rateState.rate > 0) {
-        value.classList.add('a6cny-price-value');
-        value.title = describeRate();
-      } else {
-        value.classList.add(rateState.error ? 'is-error' : 'is-pending');
-        if (!rateState.error) schedulePendingRefresh();
-      }
-      row.appendChild(value);
-    });
-  }
-
-  // ---------- 编辑模型弹窗:输入价 ----------
-
-  // 提价上限按页面公示的 20% 计算
-  const MAX_RAISE_FACTOR = 1.2;
-
-  // 价格输入区只有一个可编辑输入框(输入价),自动输出的几项均为 readonly
-  function findInputPriceField() {
-    const grid = document.querySelector('.ws-price-inputs-grid');
-    if (!grid) return null;
-    return Array.from(grid.querySelectorAll('input.ws-price-text-input')).filter((el) => !el.readOnly)[0] || null;
-  }
-
-  function readInputPrice(input) {
-    const raw = String(input.value).replace(/,/g, '').trim();
-    // 只接受十进制数;输入过程中的 "1." 也按 1 处理,单独的 "." 或空值不显示提示
-    if (!/^\d+(\.\d*)?$/.test(raw)) return null;
-    return Number(raw);
-  }
-
-  // 输入框下方追加提示:提价上限 1.2 倍,并把上限、当前值都折合为人民币
-  function decorateInputPriceHint(input) {
-    const col = input.closest('.ws-price-input-col') || input.parentElement;
-    if (!col) return;
-
-    let hint = col.querySelector('.a6cny-input-hint');
-    if (!hint) {
-      hint = document.createElement('div');
-      hint.className = 'ws-price-factor-line a6cny-input-hint';
-      const factor = col.querySelector('.ws-price-factor-line');
-      if (factor) factor.insertAdjacentElement('afterend', hint);
-      else col.appendChild(hint);
-    }
-
-    const value = readInputPrice(input);
-    const signature = (rateState.rate || (rateState.error ? 'error' : 'pending')) + '|' + value;
-    if (hint.dataset.signature === signature) return;
-    hint.dataset.signature = signature;
-
-    hint.textContent = '';
-    hint.classList.remove('is-pending', 'is-error');
-    hint.removeAttribute('title');
-    // 清空或输入了非数字时不显示提示
-    if (value === null) return;
-
-    const capped = value * MAX_RAISE_FACTOR;
-    const cnyOf = (usd) => (rateState.rate > 0 ? '（' + formatCny(usd) + '）' : '');
-    hint.append('× 1.2 = $' + formatUsd(capped) + cnyOf(capped));
-
-    if (rateState.rate > 0) {
-      hint.title = '提价上限 = 输入价 × 1.2;括号内为按实时汇率折合的人民币';
-    } else if (rateState.error) {
-      hint.classList.add('is-error');
-      hint.title = rateState.error;
-    } else {
-      hint.classList.add('is-pending');
-      schedulePendingRefresh();
-    }
-  }
-
-  // 去掉浮点尾数:2.5 × 1.2 会得到 3.0000000000000004,输入 1.234567 则保留到 6 位小数
-  function formatUsd(value) {
-    if (!String(value).includes('.')) return String(value);
-    const text = value.toFixed(6).replace(/0+$/, '');
-    return text.endsWith('.') ? text.slice(0, -1) : text;
   }
 
   // ---------- 表格行 ----------
@@ -598,21 +417,12 @@
     document.querySelectorAll('.cl-cell-earnings').forEach(decorateRowCell);
   }
 
-  // 折合行依赖输入区的实时值,输入变化时单独调用一次
-  function decoratePriceLines() {
-    document.querySelectorAll('[data-role="original-price"]').forEach(decorateOriginalPrice);
-  }
-
   // 各 decorate 函数内部比较签名,内容没变就不改 DOM,所以这里可以放心全量调用
   function updateAll() {
     const groups = document.querySelectorAll('.cl-capsules-group');
     groups.forEach((group) => group.querySelectorAll('.cl-capsule').forEach(decorateCapsule));
 
     decorateAllRows();
-    decoratePriceLines();
-
-    const inputPrice = findInputPriceField();
-    if (inputPrice) decorateInputPriceHint(inputPrice);
   }
 
   // ---------- 启动 ----------
@@ -645,23 +455,17 @@
     else window.addEventListener('load', begin, { once: true });
   }
 
+  // 0.5.x 曾在弹窗里插入折合行和 ×1.2 提示,新版平台已自带同样的信息。
+  // 旧版本留下的节点会随快照被带到新页面,启动时清掉一次
+  function removeLegacyDialogNodes() {
+    document.querySelectorAll('.a6cny-price-line, .a6cny-input-hint').forEach((el) => el.remove());
+  }
+
   function init() {
     injectStyles();
-    // 汇率到达后强制重算一次(与缓存的汇率不同时内容需要更新)
+    removeLegacyDialogNodes();
     // 汇率到达(或失败)后重绘一次;内容未变的节点不会被改动
     document.addEventListener('a6cny:rate', updateAll);
-
-    // 输入框的值不体现在 HTML 属性上,MutationObserver 观察不到,需要单独监听输入事件
-    document.addEventListener(
-      'input',
-      (event) => {
-        if (!(event.target && event.target.matches && event.target.matches('.ws-price-inputs-grid input'))) return;
-        const inputPrice = findInputPriceField();
-        if (inputPrice) decorateInputPriceHint(inputPrice);
-        decoratePriceLines();
-      },
-      true,
-    );
 
     loadCachedRate();
     // 先按缓存渲染首屏(无网络回调,不会打断帧),再在首屏稳定后更新汇率
