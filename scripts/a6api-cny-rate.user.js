@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         A6api 人民币换算
 // @namespace    https://github.com/LR0NMAN-git/public-broswer-script
-// @version      0.6.0
+// @version      0.6.1
 // @description  按实时美元汇率换算 A6api 日志页的收益与每行金额(汇率取 2 位小数,结果保留完整小数)
 // @author       LR
 // @match        https://a6api.vip/*
@@ -300,14 +300,23 @@
   // ---------- 顶部胶囊 ----------
 
   // 读取胶囊的美元金额。金额节点里可能被塞入人民币子元素,只取原始文本节点拼接后的金额
-  function readCapsuleUsd(capsule) {
+  // 读取胶囊的原始金额文本(排除脚本自己插入的人民币节点)
+  function readCapsuleText(capsule) {
     const value = capsule.querySelector('.cl-capsule-val');
-    if (!value) return null;
-    const own = Array.from(value.childNodes)
+    if (!value) return '';
+    return Array.from(value.childNodes)
       .filter((n) => !(n.nodeType === 1 && n.classList.contains('a6cny-cny')))
       .map((n) => n.textContent)
       .join('');
-    return parseUsd(own);
+  }
+
+  function readCapsuleUsd(capsule) {
+    return parseUsd(readCapsuleText(capsule));
+  }
+
+  // 页面自己已经显示人民币时(带 ¥ / ￥ / 元),不再重复换算
+  function alreadyInCny(text) {
+    return /[¥￥]|元/.test(text);
   }
 
   // 把人民币追加到原胶囊内部、紧跟美元金额之后,不新增胶囊
@@ -323,6 +332,12 @@
     const extra = Array.from(value.children).filter((el) => el.classList.contains('a6cny-cny'));
     const cny = extra.shift();
     extra.forEach((el) => el.remove());
+
+    // 页面已经给出人民币时保持原样,并移除之前换算的内容
+    if (alreadyInCny(readCapsuleText(capsule))) {
+      if (cny) cny.remove();
+      return;
+    }
 
     const usd = readCapsuleUsd(capsule);
     if (usd === null) return;
